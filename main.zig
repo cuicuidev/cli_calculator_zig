@@ -47,12 +47,15 @@ pub fn main() !void {
     }
 }
 
-// TODO: A function that takes in a "[]const u8" with a simple expressión (no brackets) and evaluates it.
-// It should return the result as a "[]const u8".
-
-// TODO: Another function that can take the whole expression and the sorted array with the bracket pair indices and evaluate each one of the sub-expressions one by one.
-// It should substitute each evaluated sub-expression with it's result before proceeding to the next.
-// The return type should be a number (is it possible to have unions of integers and floats???).
+// TODO: I need to figure out how to tokeninize the input.
+// The tokens I need are '(', ')', '^', '*', '/', '+', '-' and 'number'.
+//
+// TODO: I need a function that takes two numeric tokens and an operator token. Then it must perform a simple mathematical operation and return the result as a
+// numeric token.
+//
+// TODO: I need to figure out how to build an abstract syntax tree with the tokens. So far I know it has to be a binary tree where the leafs are the numbers and
+// the nodes are the operators. The deepest operations are the first one on the PEMDAS priority rule, so I need to implement a DFS that can simplify the nodes
+// to a leaf, recursively. The base condition is when we are left with a stump that holds a numeric token, which would be the result.
 
 // This struct holds the indices of the bracket pairs and their depth within the whole expression
 const BracketPair = struct {
