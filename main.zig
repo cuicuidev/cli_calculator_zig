@@ -14,13 +14,51 @@ pub fn main() !void {
     defer allocator.free(bare_expression);
 
     var lexer = Lexer.init(&allocator, bare_expression);
+    defer lexer.deinit();
     try lexer.tokenize();
+    try stdout.writeAll("\n\nORIGINALTOKENS\n\n");
+    try lexer.printTokens(stdout);
+    try stdout.writeAll("\n\nSORTEDTOKENS\n\n");
+    try shuntingYard(&allocator, &lexer);
     try lexer.printTokens(stdout);
 }
 
 const String = struct { slice: []const u8, start_idx: usize };
 
 const TokenType = enum { INT, FLOAT, OPERATOR, OPEN_PAREN, CLOSE_PAREN };
+
+const Associativity = enum { LEFT, RIGHT };
+
+fn Map(comptime K: type, comptime V: type, comptime size: usize) type {
+    return struct {
+        keys: [size]K,
+        values: [size]V,
+
+        const Self = @This();
+
+        pub fn init(keys: [size]K, values: [size]V) Self {
+            return .{ .keys = keys, .values = values };
+        }
+
+        pub fn get(self: Self, key: K) V {
+            var value: V = undefined;
+            var idx: usize = 0;
+
+            while (idx < self.keys.len) : (idx += 1) {
+                // std.debug.print("{c} == {c}\n", .{ self.keys[idx], key });
+                if (self.keys[idx] == key) {
+                    value = self.values[idx];
+                    return value;
+                }
+            }
+            unreachable;
+        }
+    };
+}
+
+const associativity = Map(u8, Associativity, 5).init([_]u8{ '-', '+', '/', '*', '^' }, [_]Associativity{ Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.RIGHT });
+
+const precedence = Map(u8, u2, 5).init([_]u8{ '-', '+', '/', '*', '^' }, [_]u2{ 0, 0, 1, 1, 2 });
 
 const Token = struct {
     value: []const u8,
@@ -36,8 +74,8 @@ const Token = struct {
             } else {
                 try writer.print("{c}", .{c});
             }
-            try writer.print("\", .type = {} }}\n", .{self._type});
         }
+        try writer.print("\", .type = {} }}\n", .{self._type});
     }
 };
 
@@ -125,7 +163,7 @@ const Lexer = struct {
                 if (next_char) |c| {
                     switch (c) {
                         '0'...'9' => {
-                            self._increment();
+                            return;
                         },
                         '.' => {
                             self.state = LexerState.FLOAT;
@@ -143,7 +181,7 @@ const Lexer = struct {
                 if (next_char) |c| {
                     switch (c) {
                         '0'...'9' => {
-                            self._increment();
+                            return;
                         },
                         '.' => {
                             unreachable;
@@ -183,4 +221,64 @@ const Lexer = struct {
     }
 };
 
-// TODO: shunting yard, binary tree, dfs
+fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
+    const tokens = &lexer.tokens;
+
+    var output = std.ArrayList(Token).init(allocator.*);
+    errdefer output.deinit();
+
+    var stack = std.ArrayList(Token).init(allocator.*);
+    defer stack.deinit();
+
+    for (tokens.items) |token| {
+        switch (token._type) {
+            TokenType.FLOAT, TokenType.INT => {
+                try output.append(token);
+            },
+            TokenType.OPERATOR => {
+                const this_token_val = token.value[0];
+                const is_left = associativity.get(this_token_val) == Associativity.LEFT;
+                const this_precedence = precedence.get(this_token_val);
+
+                var stack_last = stack.getLastOrNull();
+
+                while (stack.items.len > 0 and stack_last != null and stack_last.?._type == TokenType.OPERATOR and ((is_left and this_precedence <= precedence.get(stack_last.?.value[0])) or (!is_left and this_precedence < precedence.get(stack_last.?.value[0])))) {
+                    const popped = stack.pop();
+                    try output.append(popped);
+                    stack_last = stack.getLastOrNull();
+                }
+
+                try stack.append(token);
+            },
+            TokenType.OPEN_PAREN => {
+                try stack.append(token);
+            },
+            TokenType.CLOSE_PAREN => {
+                var stack_last = stack.getLastOrNull();
+                while (stack.items.len > 0 and stack_last != null and stack_last.?._type != TokenType.OPEN_PAREN) {
+                    try output.append(stack.pop());
+                    stack_last = stack.getLastOrNull();
+                }
+                if (stack_last) |stack_last_token| {
+                    if (stack_last_token._type == TokenType.OPEN_PAREN) {
+                        _ = stack.pop();
+                    }
+                }
+            },
+        }
+    }
+
+    while (stack.items.len != 0) {
+        const top_token = stack.pop();
+        if (top_token._type == TokenType.OPEN_PAREN) {
+            unreachable;
+        }
+        try output.append(top_token);
+    }
+
+    const output_slice = try output.toOwnedSlice();
+    lexer.tokens.clearAndFree();
+    try lexer.tokens.appendSlice(output_slice);
+}
+
+// TODO: binary tree, dfs
