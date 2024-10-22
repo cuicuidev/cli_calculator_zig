@@ -16,24 +16,26 @@ pub fn main() !void {
     var lexer = Lexer.init(&allocator, bare_expression);
     defer lexer.deinit();
     try lexer.tokenize();
-    try lexer.printTokens(stdout);
-    try stdout.writeAll("\n");
 
     // Parsing
     try shuntingYard(&allocator, &lexer);
-    try lexer.printTokens(stdout);
-    try stdout.writeAll("\n");
 
     // Eval
     try evaluatePostfix(&allocator, &lexer);
-    try lexer.printTokens(stdout);
+
+    const result_token = lexer.tokens.pop();
+    const result_str = result_token.value;
+
+    try stdout.writeAll("Result: ");
+    for (result_str) |c| {
+        try stdout.print("{c}", .{c});
+    }
+    try stdout.writeAll("\n");
 }
 
 const String = struct { slice: []const u8, start_idx: usize };
 
 const TokenType = enum { INT, FLOAT, OPERATOR, OPEN_PAREN, CLOSE_PAREN };
-
-const Associativity = enum { LEFT, RIGHT };
 
 fn FixedSizeMap(comptime K: type, comptime V: type, comptime size: usize) type {
     return struct {
@@ -61,6 +63,8 @@ fn FixedSizeMap(comptime K: type, comptime V: type, comptime size: usize) type {
         }
     };
 }
+
+const Associativity = enum { LEFT, RIGHT };
 
 const associativity = FixedSizeMap(u8, Associativity, 5).init([_]u8{ '-', '+', '/', '*', '^' }, [_]Associativity{ Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.RIGHT });
 
@@ -297,7 +301,6 @@ fn evaluatePostfix(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
     while (tokens.items.len > 1) {
         for (tokens.items, 0..) |token, i| {
             if (token._type == TokenType.OPERATOR) {
-                std.debug.print("Evaluating operator -> \"{c}\"\n", .{token.value[0]});
                 const token_a = tokens.items[i - 2];
                 const token_b = tokens.items[i - 1];
 
