@@ -1,7 +1,6 @@
 const std = @import("std");
 
 pub fn main() !void {
-    // Allocator and standard I/O
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator = gpa.allocator();
 
@@ -13,13 +12,20 @@ pub fn main() !void {
     const bare_expression = try stdin.readUntilDelimiterAlloc(allocator, '\n', 8192);
     defer allocator.free(bare_expression);
 
+    // Lexical Analysis
     var lexer = Lexer.init(&allocator, bare_expression);
     defer lexer.deinit();
     try lexer.tokenize();
-    try stdout.writeAll("\n\nORIGINALTOKENS\n\n");
     try lexer.printTokens(stdout);
-    try stdout.writeAll("\n\nSORTEDTOKENS\n\n");
+    try stdout.writeAll("\n");
+
+    // Parsing
     try shuntingYard(&allocator, &lexer);
+    try lexer.printTokens(stdout);
+    try stdout.writeAll("\n");
+
+    // Eval
+    try evaluatePostfix(&allocator, &lexer);
     try lexer.printTokens(stdout);
 }
 
@@ -29,7 +35,7 @@ const TokenType = enum { INT, FLOAT, OPERATOR, OPEN_PAREN, CLOSE_PAREN };
 
 const Associativity = enum { LEFT, RIGHT };
 
-fn Map(comptime K: type, comptime V: type, comptime size: usize) type {
+fn FixedSizeMap(comptime K: type, comptime V: type, comptime size: usize) type {
     return struct {
         keys: [size]K,
         values: [size]V,
@@ -56,9 +62,9 @@ fn Map(comptime K: type, comptime V: type, comptime size: usize) type {
     };
 }
 
-const associativity = Map(u8, Associativity, 5).init([_]u8{ '-', '+', '/', '*', '^' }, [_]Associativity{ Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.RIGHT });
+const associativity = FixedSizeMap(u8, Associativity, 5).init([_]u8{ '-', '+', '/', '*', '^' }, [_]Associativity{ Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.LEFT, Associativity.RIGHT });
 
-const precedence = Map(u8, u2, 5).init([_]u8{ '-', '+', '/', '*', '^' }, [_]u2{ 0, 0, 1, 1, 2 });
+const precedence = FixedSizeMap(u8, u2, 5).init([_]u8{ '-', '+', '/', '*', '^' }, [_]u2{ 0, 0, 1, 1, 2 });
 
 const Token = struct {
     value: []const u8,
@@ -230,6 +236,8 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
     var stack = std.ArrayList(Token).init(allocator.*);
     defer stack.deinit();
 
+    var open_paren_count: usize = 0;
+
     for (tokens.items) |token| {
         switch (token._type) {
             TokenType.FLOAT, TokenType.INT => {
@@ -252,8 +260,10 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
             },
             TokenType.OPEN_PAREN => {
                 try stack.append(token);
+                open_paren_count += 1;
             },
             TokenType.CLOSE_PAREN => {
+                if (open_paren_count == 0) unreachable; // If we find a closing parenthesis without a previous open one, we panic.
                 var stack_last = stack.getLastOrNull();
                 while (stack.items.len > 0 and stack_last != null and stack_last.?._type != TokenType.OPEN_PAREN) {
                     try output.append(stack.pop());
@@ -262,6 +272,7 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
                 if (stack_last) |stack_last_token| {
                     if (stack_last_token._type == TokenType.OPEN_PAREN) {
                         _ = stack.pop();
+                        open_paren_count -= 1; // We "consume" the open parenthesis.
                     }
                 }
             },
@@ -271,7 +282,7 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
     while (stack.items.len != 0) {
         const top_token = stack.pop();
         if (top_token._type == TokenType.OPEN_PAREN) {
-            unreachable;
+            unreachable; // Panic if parenthesis do not match.
         }
         try output.append(top_token);
     }
@@ -281,4 +292,52 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
     try lexer.tokens.appendSlice(output_slice);
 }
 
-// TODO: binary tree, dfs
+fn evaluatePostfix(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
+    var tokens = &lexer.tokens;
+    while (tokens.items.len > 1) {
+        for (tokens.items, 0..) |token, i| {
+            if (token._type == TokenType.OPERATOR) {
+                std.debug.print("Evaluating operator -> \"{c}\"\n", .{token.value[0]});
+                const token_a = tokens.items[i - 2];
+                const token_b = tokens.items[i - 1];
+
+                const val_a = try std.fmt.parseFloat(f64, token_a.value);
+
+                const val_b = try std.fmt.parseFloat(f64, token_b.value);
+
+                const operator = token.value[0];
+                const result = blk: {
+                    switch (operator) {
+                        '+' => break :blk val_a + val_b,
+                        '-' => break :blk val_a - val_b,
+                        '/' => break :blk val_a / val_b,
+                        '*' => break :blk val_a * val_b,
+                        '^' => break :blk std.math.pow(f64, val_a, val_b),
+                        else => unreachable,
+                    }
+                };
+
+                const result_type = @TypeOf(result);
+
+                const result_token_type = blk: {
+                    switch (result_type) {
+                        f64 => break :blk TokenType.FLOAT,
+                        u64 => break :blk TokenType.INT,
+                        else => unreachable,
+                    }
+                };
+
+                const result_token = Token{
+                    ._type = result_token_type,
+                    .value = try std.fmt.allocPrint(allocator.*, "{d}", .{result}),
+                };
+
+                tokens.items[i - 2] = result_token;
+                _ = tokens.orderedRemove(i - 1);
+                _ = tokens.orderedRemove(i - 1);
+
+                break;
+            }
+        }
+    }
+}
