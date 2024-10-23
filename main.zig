@@ -7,26 +7,82 @@ pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn().reader();
 
+    // Introduction
+    const introduction =
+        \\                Simple Calculator
+        \\*************************************************
+        \\
+        \\   You can use one of the following operations:
+        \\
+        \\     · + addittion
+        \\     · - subtraction
+        \\     · * multiplication
+        \\     · / division
+        \\     · ^ exponentiation
+        \\
+        \\   Additionally, you can group your expressions in parenthesis.
+        \\   The calculator will evaluate using the PEMDAS rule.
+        \\
+        \\
+    ;
+    try stdout.writeAll(introduction);
+
     // User input
-    try stdout.writeAll("This is a calculator. Input your expression:\n");
-    const bare_expression = try stdin.readUntilDelimiterAlloc(allocator, '\n', 8192);
+    try stdout.writeAll("   Input your expression -> ");
+    var bare_expression = try stdin.readUntilDelimiterAlloc(allocator, '\n', 8192);
     defer allocator.free(bare_expression);
+    while (bare_expression.len == 0) {
+        try stdout.writeAll("   The input cannot be empty. Try again -> ");
+        bare_expression = try stdin.readUntilDelimiterAlloc(allocator, '\n', 8192);
+    }
 
     // Lexical Analysis
     var lexer = Lexer.init(&allocator, bare_expression);
     defer lexer.deinit();
-    try lexer.tokenize();
+    lexer.tokenize() catch |err| {
+        switch (err) {
+            LexerErr.UnrecognizedCharacter => {
+                try stdout.writeAll("\n\x1b[31mError:\x1b[0m UnrecognizedCharacter\n");
+                return;
+            },
+            LexerErr.InvalidSyntax => {
+                try stdout.writeAll("\n\x1b[31mError:\x1b[0m InvalidSyntax\n");
+                return;
+            },
+            LexerErr.IncompleteInput => {
+                try stdout.writeAll("\n\x1b[31mError:\x1b[0m IncompleteInput\n");
+                return;
+            },
+            else => unreachable,
+        }
+    };
 
     // Parsing
-    try shuntingYard(&allocator, &lexer);
+    shuntingYard(&allocator, &lexer) catch |err| {
+        switch (err) {
+            LexerErr.UnmachedParenthesis => {
+                try stdout.writeAll("\n\x1b[31mError:\x1b[0m UnmatchedParenthesis\n");
+                return;
+            },
+            else => unreachable,
+        }
+    };
 
     // Eval
-    try evaluatePostfix(&allocator, &lexer);
+    evaluatePostfix(&allocator, &lexer) catch |err| {
+        switch (err) {
+            LexerErr.DivisionByZero => {
+                try stdout.writeAll("\n\x1b[31mError:\x1b[0m DivisionByZero\n");
+                return;
+            },
+            else => unreachable,
+        }
+    };
 
     const result_token = lexer.tokens.pop();
     const result_str = result_token.value;
 
-    try stdout.writeAll("Result: ");
+    try stdout.writeAll("   Result: ");
     for (result_str) |c| {
         try stdout.print("{c}", .{c});
     }
@@ -91,6 +147,14 @@ const Token = struct {
 
 const LexerState = enum { NEW_TOKEN, COMPLETE_TOKEN, INT, FLOAT, OPERATOR, OPEN_PAREN, CLOSE_PAREN };
 
+const LexerErr = error{
+    UnrecognizedCharacter,
+    IncompleteInput,
+    UnmachedParenthesis,
+    DivisionByZero,
+    InvalidSyntax,
+};
+
 const Lexer = struct {
     source: []const u8,
     pos: usize,
@@ -124,6 +188,12 @@ const Lexer = struct {
     pub fn tokenize(self: *Self) !void {
         while (self.pos < self.max_idx) {
             try self._next();
+        }
+        if (self.tokens.items[0]._type == TokenType.OPERATOR) {
+            return LexerErr.IncompleteInput;
+        }
+        if (self.tokens.getLastOrNull().?._type == TokenType.OPERATOR) {
+            return LexerErr.IncompleteInput;
         }
     }
 
@@ -159,7 +229,7 @@ const Lexer = struct {
                         self.state = LexerState.FLOAT;
                     },
                     else => {
-                        unreachable;
+                        return LexerErr.UnrecognizedCharacter;
                     },
                 }
             },
@@ -194,7 +264,7 @@ const Lexer = struct {
                             return;
                         },
                         '.' => {
-                            unreachable;
+                            return LexerErr.InvalidSyntax;
                         },
                         else => {
                             try self._create_token(TokenType.FLOAT);
@@ -267,7 +337,7 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
                 open_paren_count += 1;
             },
             TokenType.CLOSE_PAREN => {
-                if (open_paren_count == 0) unreachable; // If we find a closing parenthesis without a previous open one, we panic.
+                if (open_paren_count == 0) return LexerErr.UnmachedParenthesis;
                 var stack_last = stack.getLastOrNull();
                 while (stack.items.len > 0 and stack_last != null and stack_last.?._type != TokenType.OPEN_PAREN) {
                     try output.append(stack.pop());
@@ -276,7 +346,7 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
                 if (stack_last) |stack_last_token| {
                     if (stack_last_token._type == TokenType.OPEN_PAREN) {
                         _ = stack.pop();
-                        open_paren_count -= 1; // We "consume" the open parenthesis.
+                        open_paren_count -= 1;
                     }
                 }
             },
@@ -286,7 +356,7 @@ fn shuntingYard(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
     while (stack.items.len != 0) {
         const top_token = stack.pop();
         if (top_token._type == TokenType.OPEN_PAREN) {
-            unreachable; // Panic if parenthesis do not match.
+            return LexerErr.UnmachedParenthesis;
         }
         try output.append(top_token);
     }
@@ -313,7 +383,7 @@ fn evaluatePostfix(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
                     switch (operator) {
                         '+' => break :blk val_a + val_b,
                         '-' => break :blk val_a - val_b,
-                        '/' => break :blk val_a / val_b,
+                        '/' => break :blk if (val_b != 0) val_a / val_b else return LexerErr.DivisionByZero,
                         '*' => break :blk val_a * val_b,
                         '^' => break :blk std.math.pow(f64, val_a, val_b),
                         else => unreachable,
@@ -338,7 +408,6 @@ fn evaluatePostfix(allocator: *std.mem.Allocator, lexer: *Lexer) !void {
                 tokens.items[i - 2] = result_token;
                 _ = tokens.orderedRemove(i - 1);
                 _ = tokens.orderedRemove(i - 1);
-
                 break;
             }
         }
